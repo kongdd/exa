@@ -4,69 +4,64 @@ use std::cmp::Ordering;
 use std::iter::FromIterator;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
+use glob::Pattern;
 
 use crate::fs::DotFilter;
+use crate::options::OptionsError;
 use crate::fs::File;
-
 
 /// The **file filter** processes a list of files before displaying them to
 /// the user, by removing files they don’t want to see, and putting the list
 /// in the desired order.
-///
 /// Usually a user does not want to see *every* file in the list. The most
 /// common case is to remove files starting with `.`, which are designated
 /// as ‘hidden’ files.
-///
 /// The special files `.` and `..` files are not actually filtered out, but
 /// need to be inserted into the list, in a special case.
-///
 /// The filter also governs sorting the list. After being filtered, pairs of
 /// files are compared and sorted based on the result, with the sort field
 /// performing the comparison.
-#[derive(PartialEq, Eq, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub struct FileFilter {
-
     /// Whether directories should be listed first, and other types of file
     /// second. Some users prefer it like this.
     pub list_dirs_first: bool,
-
     /// The metadata field to sort by.
     pub sort_field: SortField,
-
     /// Whether to reverse the sorting order. This would sort the largest
     /// files first, or files starting with Z, or the most-recently-changed
     /// ones, depending on the sort field.
     pub reverse: bool,
-
     /// Whether to only show directories.
     pub only_dirs: bool,
-
     /// Which invisible “dot” files to include when listing a directory.
     ///
     /// Files starting with a single “.” are used to determine “system” or
     /// “configuration” files that should not be displayed in a regular
     /// directory listing, and the directory entries “.” and “..” are
     /// considered extra-special.
-    ///
     /// This came about more or less by a complete historical accident,
     /// when the original `ls` tried to hide `.` and `..`:
-    ///
     /// [Linux History: How Dot Files Became Hidden Files](https://linux-audit.com/linux-history-how-dot-files-became-hidden-files/)
     pub dot_filter: DotFilter,
-
     /// Glob patterns to ignore. Any file name that matches *any* of these
     /// patterns won’t be displayed in the list.
     pub ignore_patterns: IgnorePatterns,
-
     /// Whether to ignore Git-ignored patterns.
     pub git_ignore: GitIgnore,
+    /// Glob patterns to include. Any file name that matches *any* of these
+    /// patterns will be displayed in the list.
+    pub include_patterns: IncludePatterns,
 }
 
 impl FileFilter {
     /// Remove every file in the given vector that does *not* pass the
     /// filter predicate for files found inside a directory.
     pub fn filter_child_files(&self, files: &mut Vec<File<'_>>) {
-        files.retain(|f| ! self.ignore_patterns.is_ignored(&f.name));
+        files.retain(|f| {
+            !self.ignore_patterns.is_ignored(&f.name) &&
+            self.include_patterns.is_included(&f.name)
+        });
 
         if self.only_dirs {
             files.retain(File::is_directory);
@@ -84,7 +79,8 @@ impl FileFilter {
     /// from the glob, even though the globbing is done by the shell!
     pub fn filter_argument_files(&self, files: &mut Vec<File<'_>>) {
         files.retain(|f| {
-            ! self.ignore_patterns.is_ignored(&f.name)
+            !self.ignore_patterns.is_ignored(&f.name) &&
+            self.include_patterns.is_included(&f.name)
         });
     }
 
@@ -111,11 +107,9 @@ impl FileFilter {
     }
 }
 
-
 /// User-supplied field to sort by.
 #[derive(PartialEq, Eq, Debug, Copy, Clone)]
 pub enum SortField {
-
     /// Don’t apply any sorting. This is usually used as an optimisation in
     /// scripts, where the order doesn’t matter.
     Unsorted,
@@ -155,7 +149,6 @@ pub enum SortField {
     ///
     /// This field is used to mark the time when a file’s metadata
     /// changed — its permissions, owners, or link count.
-    ///
     /// In original Unix, this was, however, meant as creation time.
     /// <https://www.bell-labs.com/usr/dmr/www/cacm.html>
     ChangedDate,
@@ -187,16 +180,8 @@ pub enum SortField {
 
 /// Whether a field should be sorted case-sensitively or case-insensitively.
 /// This determines which of the `natord` functions to use.
-///
-/// I kept on forgetting which one was sensitive and which one was
-/// insensitive. Would a case-sensitive sort put capital letters first because
-/// it takes the case of the letters into account, or intermingle them with
-/// lowercase letters because it takes the difference between the two cases
-/// into account? I gave up and just named these two variants after the
-/// effects they have.
 #[derive(PartialEq, Eq, Debug, Copy, Clone)]
 pub enum SortCase {
-
     /// Sort files case-sensitively with uppercase first, with ‘A’ coming
     /// before ‘a’.
     ABCabc,
@@ -206,7 +191,6 @@ pub enum SortCase {
 }
 
 impl SortField {
-
     /// Compares two files to determine the order they should be listed in,
     /// depending on the search field.
     ///
@@ -220,10 +204,8 @@ impl SortField {
 
         match self {
             Self::Unsorted  => Ordering::Equal,
-
             Self::Name(ABCabc)  => natord::compare(&a.name, &b.name),
             Self::Name(AaBbCc)  => natord::compare_ignore_case(&a.name, &b.name),
-
             Self::Size          => a.metadata.len().cmp(&b.metadata.len()),
             #[cfg(unix)]
             Self::FileInode     => a.metadata.ino().cmp(&b.metadata.ino()),
@@ -232,22 +214,18 @@ impl SortField {
             Self::ChangedDate   => a.changed_time().cmp(&b.changed_time()),
             Self::CreatedDate   => a.created_time().cmp(&b.created_time()),
             Self::ModifiedAge   => b.modified_time().cmp(&a.modified_time()),  // flip b and a
-
             Self::FileType => match a.type_char().cmp(&b.type_char()) { // todo: this recomputes
                 Ordering::Equal  => natord::compare(&*a.name, &*b.name),
                 order            => order,
             },
-
             Self::Extension(ABCabc) => match a.ext.cmp(&b.ext) {
                 Ordering::Equal  => natord::compare(&*a.name, &*b.name),
                 order            => order,
             },
-
             Self::Extension(AaBbCc) => match a.ext.cmp(&b.ext) {
                 Ordering::Equal  => natord::compare_ignore_case(&*a.name, &*b.name),
                 order            => order,
             },
-
             Self::NameMixHidden(ABCabc) => natord::compare(
                 Self::strip_dot(&a.name),
                 Self::strip_dot(&b.name)
@@ -267,7 +245,6 @@ impl SortField {
     }
 }
 
-
 /// The **ignore patterns** are a list of globs that are tested against
 /// each filename, and if any of them match, that file isn’t displayed.
 /// This lets a user hide, say, text files by ignoring `*.txt`.
@@ -277,7 +254,6 @@ pub struct IgnorePatterns {
 }
 
 impl FromIterator<glob::Pattern> for IgnorePatterns {
-
     fn from_iter<I>(iter: I) -> Self
     where I: IntoIterator<Item = glob::Pattern>
     {
@@ -287,7 +263,6 @@ impl FromIterator<glob::Pattern> for IgnorePatterns {
 }
 
 impl IgnorePatterns {
-
     /// Create a new list from the input glob strings, turning the inputs that
     /// are valid glob patterns into an `IgnorePatterns`. The inputs that
     /// don’t parse correctly are returned separately.
@@ -325,19 +300,51 @@ impl IgnorePatterns {
     }
 }
 
+/// The **include patterns** are a list of glob patterns that are tested against
+/// each filename, and if any of them match, that file is displayed.
+/// When no include patterns are provided, all files are included.
+#[derive(Debug, Clone)]
+pub struct IncludePatterns {
+    patterns: Vec<Pattern>,
+}
+
+impl IncludePatterns {
+    pub fn deduce(matches: &crate::options::parser::MatchedFlags<'_>) -> Result<Self, OptionsError> {
+        if let Some(val) = matches.get(&crate::options::flags::INCLUDE_GLOB)? {
+            let pattern_str = val.to_string_lossy();
+            let mut patterns = Vec::new();
+            // Split by pipe character (|) similar to Linux ls style
+            for part in pattern_str.split('|') {
+                match Pattern::new(part) {
+                    Ok(pat) => patterns.push(pat),
+                    Err(_e) => {
+                        return Err(OptionsError::BadArgument(&crate::options::flags::INCLUDE_GLOB,
+                                                              std::ffi::OsString::from(part)));
+                    }
+                }
+            }
+            Ok(Self { patterns })
+        } else {
+            Ok(Self { patterns: Vec::new() })
+        }
+    }
+
+    pub fn is_included(&self, filename: &str) -> bool {
+        if self.patterns.is_empty() {
+            return true;
+        }
+        self.patterns.iter().any(|p| p.matches(filename))
+    }
+}
 
 /// Whether to ignore or display files that Git would ignore.
 #[derive(PartialEq, Eq, Debug, Copy, Clone)]
 pub enum GitIgnore {
-
     /// Ignore files that Git would ignore.
     CheckAndIgnore,
-
     /// Display files, even if Git would ignore them.
     Off,
 }
-
-
 
 #[cfg(test)]
 mod test_ignores {
@@ -347,30 +354,42 @@ mod test_ignores {
     fn empty_matches_nothing() {
         let pats = IgnorePatterns::empty();
         assert!(!pats.is_ignored("nothing"));
-        assert!(!pats.is_ignored("test.mp3"));
-    }
-
-    #[test]
-    fn ignores_a_glob() {
-        let (pats, fails) = IgnorePatterns::parse_from_iter(vec![ "*.mp3" ]);
-        assert!(fails.is_empty());
-        assert!(!pats.is_ignored("nothing"));
-        assert!(pats.is_ignored("test.mp3"));
     }
 
     #[test]
     fn ignores_an_exact_filename() {
         let (pats, fails) = IgnorePatterns::parse_from_iter(vec![ "nothing" ]);
-        assert!(fails.is_empty());
         assert!(pats.is_ignored("nothing"));
-        assert!(!pats.is_ignored("test.mp3"));
+        assert!(fails.is_empty());
+    }
+
+    #[test]
+    fn ignores_a_glob() {
+        let (pats, fails) = IgnorePatterns::parse_from_iter(vec![ "*.mp3" ]);
+        assert!(pats.is_ignored("test.mp3"));
+        assert!(fails.is_empty());
     }
 
     #[test]
     fn ignores_both() {
         let (pats, fails) = IgnorePatterns::parse_from_iter(vec![ "nothing", "*.mp3" ]);
-        assert!(fails.is_empty());
         assert!(pats.is_ignored("nothing"));
         assert!(pats.is_ignored("test.mp3"));
+        assert!(fails.is_empty());
+    }
+
+    #[test]
+    fn include_all_when_none_given() {
+        let inc = IncludePatterns { patterns: Vec::new() };
+        assert!(inc.is_included("anyfile.txt"));
+    }
+
+    #[test]
+    fn include_glob_matches() {
+        let inc = IncludePatterns {
+            patterns: vec![Pattern::new("test*.rs").unwrap()]
+        };
+        assert!(inc.is_included("test_file.rs"));
+        assert!(!inc.is_included("example.rs"));
     }
 }

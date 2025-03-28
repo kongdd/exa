@@ -1,7 +1,7 @@
 //! Parsing the options for `FileFilter`.
 
 use crate::fs::DotFilter;
-use crate::fs::filter::{FileFilter, SortField, SortCase, IgnorePatterns, GitIgnore};
+use crate::fs::filter::{FileFilter, SortField, SortCase, IgnorePatterns, GitIgnore, IncludePatterns};
 
 use crate::options::{flags, OptionsError};
 use crate::options::parser::MatchedFlags;
@@ -19,6 +19,7 @@ impl FileFilter {
             dot_filter:       DotFilter::deduce(matches)?,
             ignore_patterns:  IgnorePatterns::deduce(matches)?,
             git_ignore:       GitIgnore::deduce(matches)?,
+            include_patterns: IncludePatterns::deduce(matches)?,
         })
     }
 }

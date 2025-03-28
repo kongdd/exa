@@ -79,7 +79,7 @@ use crate::theme::Options as ThemeOptions;
 mod dir_action;
 mod file_name;
 mod filter;
-mod flags;
+pub mod flags;
 mod theme;
 mod view;
 
@@ -89,7 +89,7 @@ pub use self::error::{OptionsError, NumberSource};
 mod help;
 use self::help::HelpString;
 
-mod parser;
+pub mod parser;
 use self::parser::MatchedFlags;
 
 pub mod vars;
